@@ -45,6 +45,6 @@ jobs:
           output/sensitivity_summary.csv
           output/capacity_statistics.csv
           output/capacity_variation_summary.csv
-          output/capacity_variation/
+          ':(glob)output/capacity_variation/**/*.csv'
       - name: Render figure independently
         run: python plot_allocation.py
