@@ -1,0 +1,47 @@
+name: Validate L3GSA simulation
+
+on:
+  pull_request:
+    paths:
+      - "experiments/task_distribution/**"
+      - ".github/workflows/validate-simulation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/task_distribution/**"
+      - ".github/workflows/validate-simulation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: experiments/task_distribution
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: experiments/task_distribution/requirements.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Reproduce main and sensitivity runs
+        run: python simulate_allocation.py --sensitivity
+      - name: Check queues, conservation and exported data
+        run: python validate_model.py
+      - name: Verify committed numerical summaries
+        run: >-
+          git diff --exit-code --
+          output/plot_data.csv
+          output/allocation_runs.csv
+          output/allocation_summary.csv
+          output/auxiliary_control_runs.csv
+          output/sensitivity_summary.csv
+      - name: Render figure independently
+        run: python plot_allocation.py

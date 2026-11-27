@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "checks": [
+    "exact single-server FIFO",
+    "backlog persists beyond 10-second metric window",
+    "four parallel workstations",
+    "measured capacity step changes completion correctly",
+    "saturated token-work rate and complete cohort drain",
+    "report causality and delay",
+    "seeded lifecycle determinism",
+    "independent request-log re-aggregation",
+    "plot means/min-max match run ratios",
+    "paired offered counts",
+    "no semantic violations by constrained policies"
+  ],
+  "hardware_error_validation": "unavailable: no independent measured per-request reference supplied"
+}
