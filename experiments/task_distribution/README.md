@@ -147,3 +147,23 @@ python compare_measurements.py --measured real_allocation_counts.csv
 ## 9. Git中的结果与生成日志
 
 仓库保留汇总CSV、运行配置、验证报告和结果图。`requests.csv`、`queue_snapshots.csv`、`input_traces.csv`由完整运行生成，但不提交Git。历史压缩包也不重复纳入源码版本库。
+
+## 10. 设备吞吐波动与指标分母
+
+新增可选的设备级吞吐波动敏感性检查，恒定吞吐主图保留为参照：
+
+```bash
+python simulate_allocation.py --sensitivity --capacity-variation
+```
+
+四个附加场景比较单设备CV为5%/10%的独立波动，以及10%波动中站点内50%/100%共同对数方差。
+采样间隔1 s、相关时间5 s均为模型假设，CV不是最大涨跌幅。过程改变实际处理速率和服务完成时刻，
+不对图线加噪声或强制降低末点。每个场景仍是独立的3次运行，不能合并成15次重复。
+
+主图 `precise_at_site2_pct` 的分母是**分配到site 2的全部任务**。
+新增 `site2_precise_sent_to_site2_pct` 的分母是**输入中所有要求site 2模型的精确任务**；它记录分配目的地，
+不是包送达或业务成功率。另列窗口结束前的模型prefill完成比例，避免将分配和完成混淆。
+空分母输出为空，不伪造0%或100%。
+
+详细公式、四台设备聚合的影响及结果见 [CAPACITY_VARIATION.md](CAPACITY_VARIATION.md)。
+每个场景的配置和观察到的设备/池均值与CV均保留；原始每秒速率轨迹可以从种子重新生成。

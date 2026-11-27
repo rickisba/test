@@ -2,6 +2,7 @@
 
 python simulate_allocation.py
 python simulate_allocation.py --sensitivity
+python simulate_allocation.py --capacity-variation
 python simulate_allocation.py --arrivals measured_arrivals.csv --rates measured_rates.csv
 
 Configuration is in CONFIG below. Plotting is a separate standalone file.
@@ -47,6 +48,11 @@ class Settings:
     report_delay_s: float = 0.2
     max_batch_requests: int = 1  # Effective FCFS token server, not real GPU batch size.
     routing_metric: str = "processed_work_plus_backlog"
+    # Optional synthetic sensitivity only; the constant-rate reference stays 0.
+    capacity_cv: float = 0.0
+    capacity_common_fraction: float = 0.0  # Fraction of log-variance shared within a site.
+    capacity_correlation_s: float = 5.0  # Assumed temporal e-folding time, not fitted.
+    capacity_step_s: float = 1.0
     active_local_clients: int = 4  # Four clients in the tested region; other region idle.
     client_nic_mbps: float = 1000.0
     upload_mbps: tuple = (942.0, 944.0)
@@ -69,6 +75,77 @@ def write_csv(path, rows):
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
+
+
+def make_capacity_trace(c, seed):
+    """Stationary mean-one lognormal AR(1) multipliers for each workstation.
+
+    Shared and individual components are independent between sites. The rate
+    process has a separate seed stream; arrival/class/static draws never move.
+    No finite-trajectory recentering, clipping, or endpoint/curve fitting occurs.
+    """
+    if c.capacity_cv < 0 or not 0 <= c.capacity_common_fraction <= 1:
+        raise ValueError("Invalid capacity CV or shared log-variance fraction")
+    if c.capacity_correlation_s <= 0 or c.capacity_step_s <= 0:
+        raise ValueError("Capacity correlation and sample interval must be positive")
+    if c.capacity_cv == 0:
+        return []  # Preserve the constant-rate reference exactly, including events.
+    rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(5)[4])
+    devices = [(s,k+1) for s,n in enumerate(c.workstations_per_site) for k in range(n)]
+    common = rng.normal(size=2)
+    individual = rng.normal(size=len(devices))
+    sigma = np.sqrt(np.log1p(c.capacity_cv**2))
+    rho = np.exp(-c.capacity_step_s/c.capacity_correlation_s)
+    innovation = np.sqrt(1-rho*rho)
+    shared = np.sqrt(c.capacity_common_fraction)
+    independent = np.sqrt(1-c.capacity_common_fraction)
+    duration = c.warmup_s+c.measurement_s
+    rows = []
+    for step in range(int(np.floor(duration/c.capacity_step_s))+1):
+        if step:
+            common = rho*common+innovation*rng.normal(size=2)
+            individual = rho*individual+innovation*rng.normal(size=len(devices))
+        for j,(site,worker) in enumerate(devices):
+            z = shared*common[site]+independent*individual[j]
+            rate = c.per_workstation_prefill_tps[site]*np.exp(sigma*z-sigma*sigma/2)
+            rows.append(dict(time_s=float(step*c.capacity_step_s),site=site+1,
+                             worker=worker,prefill_tps=float(rate)))
+    return rows
+
+
+def capacity_statistics(c, rows, rep, seed):
+    """Time-weighted observed means/CVs in the measurement interval."""
+    groups = {}
+    for r in rows:
+        groups.setdefault((int(r["site"]),int(r["worker"])),[]).append(r)
+    end = c.warmup_s+c.measurement_s
+    result = []
+    for site,n in enumerate(c.workstations_per_site,1):
+        series = {}
+        for worker in range(1,n+1):
+            samples = sorted(groups.get((site,worker),[]),key=lambda r:float(r["time_s"]))
+            if not samples:
+                samples=[dict(time_s=0.,prefill_tps=c.per_workstation_prefill_tps[site-1])]
+            series[worker] = samples
+        boundaries = sorted({c.warmup_s,end,*[float(r["time_s"]) for ss in series.values()
+                                             for r in ss if c.warmup_s < float(r["time_s"]) < end]})
+        values={w:[] for w in range(1,n+1)}
+        weights=[]
+        for a,b in zip(boundaries,boundaries[1:]):
+            weights.append(b-a)
+            for w,ss in series.items():
+                eligible=[r for r in ss if float(r["time_s"]) <= a]
+                rate=float(eligible[-1]["prefill_tps"]) if eligible else c.per_workstation_prefill_tps[site-1]
+                values[w].append(rate)
+        vectors=[(str(w),np.array(v)) for w,v in values.items()]
+        vectors.append(("aggregate",np.sum(list(values.values()),axis=0)))
+        for label,v in vectors:
+            mean=float(np.average(v,weights=weights))
+            cv=float(np.sqrt(np.average((v-mean)**2,weights=weights))/mean)
+            result.append(dict(run=rep,seed=seed,site=site,worker=label,
+                target_device_cv=c.capacity_cv,common_log_variance_fraction=c.capacity_common_fraction,
+                observed_mean_tps=mean,observed_cv=cv,min_tps=float(v.min()),max_tps=float(v.max())))
+    return result
 
 
 def make_arrivals(c, seed, file=None):
@@ -333,6 +410,7 @@ def summarise_run(c, requests, policy, rep, seed, fraction, engine, scenario):
     site2 = [r for r in cohort if r["assigned_site"]==2]
     precise = [r for r in site2 if r["kind"]==2]
     precise_all = [r for r in cohort if r["kind"]]
+    offered_site2_precise = [r for r in cohort if r["kind"]==2]
     wait = np.array([r["queue_wait_s"] for r in cohort])
     latency = np.array([r["prefill_surrogate_latency_s"] for r in cohort])
     end = c.warmup_s+c.measurement_s
@@ -342,10 +420,13 @@ def summarise_run(c, requests, policy, rep, seed, fraction, engine, scenario):
                actual_total_rps=len(cohort)/c.measurement_s,
                actual_precise_rps=sum(r["kind"]==2 for r in cohort)/c.measurement_s,
                site2_requests=len(site2), site2_precise_requests=len(precise),
+               input_site2_precise_requests=len(offered_site2_precise),
+               site2_precise_sent_to_site2_pct=100*len(precise)/len(offered_site2_precise) if offered_site2_precise else None,
+               site2_precise_prefill_completed_by_window_end_pct=100*sum(r["prefill_finish_s"] < end for r in precise)/len(offered_site2_precise) if offered_site2_precise else None,
                fuzzy_to_site2=sum(r["kind"]==0 for r in site2),
                wrong_site1_precise_to_site2=sum(r["kind"]==1 for r in site2),
                precise_at_site2_pct=100*len(precise)/len(site2) if site2 else 0.,
-               precise_model_assignment_accuracy_pct=100*sum(r["semantic_match"] for r in precise_all)/len(precise_all),
+               precise_model_assignment_accuracy_pct=100*sum(r["semantic_match"] for r in precise_all)/len(precise_all) if precise_all else None,
                queue_wait_mean_s=float(wait.mean()), queue_wait_p95_s=float(np.quantile(wait,.95)),
                surrogate_latency_p50_s=float(np.quantile(latency,.5)),
                surrogate_latency_p95_s=float(np.quantile(latency,.95)),
@@ -354,7 +435,7 @@ def summarise_run(c, requests, policy, rep, seed, fraction, engine, scenario):
                measured_arrivals_prefill_finished_after_window=sum(r["prefill_finish_s"] >= end for r in cohort),
                drained_measured_cohort=len(cohort),
                max_work_conservation_error_tokens=engine.conservation_error)
-    if policy != "Dyncast-task":
+    if policy != "Dyncast-task" and precise_all:
         assert row["precise_model_assignment_accuracy_pct"]==100
     return row
 
@@ -386,13 +467,18 @@ def run_scenario(c, out, name, arrivals=None, rate_file=None, detailed=True):
     if rate_file:
         with Path(rate_file).open(newline="",encoding="utf-8-sig") as f:
             rate_rows=list(csv.DictReader(f))
-    runs,inputs,auxiliary=[],[],[]
+        if c.capacity_cv:
+            raise ValueError("Use either measured rates or a synthetic capacity process, not both")
+    runs,inputs,auxiliary,capacity_rows,capacity_stats=[],[],[],[],[]
     request_path=out/"requests.csv"
     snapshots_path=out/"queue_snapshots.csv"
     with request_path.open("w",newline="",encoding="utf-8") as rf, snapshots_path.open("w",newline="",encoding="utf-8") as sf:
         rw=sw=None
         for rep,seed in enumerate(c.seeds,1):
             trace=make_arrivals(c,seed,arrivals)
+            current_rates=rate_rows if rate_file else make_capacity_trace(c,seed)
+            capacity_stats.extend(capacity_statistics(c,current_rates,rep,seed))
+            capacity_rows.extend(dict(run=rep,seed=seed,**r) for r in current_rates)
             for ri,t in enumerate(trace["times"]):
                 inputs.append(dict(run=rep,seed=seed,request_id=ri,arrival_s=float(t),client_id=int(trace["clients"][ri]),
                     measurement=int(trace["measured"][ri]),class_rank=int(trace["ranks"][ri]),
@@ -401,7 +487,7 @@ def run_scenario(c, out, name, arrivals=None, rate_file=None, detailed=True):
                 kinds=make_classes(c,trace,fraction)
                 selected_policies=POLICIES+(AUXILIARY_POLICIES if name=="main" else ())
                 for policy in selected_policies:
-                    eng=Engine(c,trace,kinds,policy,rate_rows,demand_fraction=fraction)
+                    eng=Engine(c,trace,kinds,policy,current_rates,demand_fraction=fraction)
                     req=eng.run()
                     runrow=summarise_run(c,req,policy,rep,seed,fraction,eng,name)
                     if policy in AUXILIARY_POLICIES:
@@ -425,6 +511,9 @@ def run_scenario(c, out, name, arrivals=None, rate_file=None, detailed=True):
         request_path.unlink();snapshots_path.unlink()
     summary,plot=aggregate(runs,c)
     write_csv(out/"allocation_runs.csv",runs)
+    write_csv(out/"capacity_statistics.csv",capacity_stats)
+    if capacity_rows:
+        write_csv(out/"capacity_traces.csv",capacity_rows)
     if auxiliary:
         write_csv(out/"auxiliary_control_runs.csv",auxiliary)
     write_csv(out/"allocation_summary.csv",summary)
@@ -442,6 +531,12 @@ def run_scenario(c, out, name, arrivals=None, rate_file=None, detailed=True):
         rate_trace_file=str(rate_file) if rate_file else None,
         arrivals_file=str(arrivals) if arrivals else None,
         independent_arrival_repetitions=not bool(arrivals),
+        capacity_process=dict(type="external step trace" if rate_file else "stationary lognormal AR(1)" if c.capacity_cv else "constant reference",
+            amplitude_status="synthetic sensitivity assumptions, not inferred from the two mean throughput values",
+            target_device_cv=c.capacity_cv,within_site_shared_log_variance_fraction=c.capacity_common_fraction,
+            temporal_correlation_s=c.capacity_correlation_s,sample_interval_s=c.capacity_step_s,
+            main_axis="site-2 precise requests assigned to site 2 / all requests assigned to site 2",
+            assignment_axis="site-2 precise requests assigned to site 2 / all offered site-2 precise requests"),
         limitations=["Logged prompt throughput may be achieved offered-load throughput rather than saturated service capacity.",
             "Four identical independent replicas per pool are assumed; scaling has not been measured.",
             "FCFS/additive token-work batching does not emulate vLLM continuous batching or KV-cache behavior.",
@@ -458,6 +553,33 @@ def run_scenario(c, out, name, arrivals=None, rate_file=None, detailed=True):
     return runs,summary,plot
 
 
+def run_capacity_variation(c, out, main_rows, main_summary):
+    """Keep the constant reference; report assumed variation scenarios separately."""
+    if c.capacity_cv:
+        raise ValueError("Capacity comparison requires CONFIG.capacity_cv=0 as its reference")
+    scenarios=[("device_cv05_independent",.05,0.),("device_cv10_independent",.10,0.),
+               ("device_cv10_half_shared",.10,.5),("device_cv10_shared",.10,1.)]
+    lookup={(r["pro_precise_fraction"],r["policy"]):r["mean"] for r in main_summary}
+    comparisons=[]
+    all_scenarios=[("constant_reference",c,main_rows,main_summary)]
+    for name,cv,shared in scenarios:
+        setting=replace(c,capacity_cv=cv,capacity_common_fraction=shared)
+        rr,ss,_=run_scenario(setting,out/"capacity_variation"/name,name,detailed=False)
+        all_scenarios.append((name,setting,rr,ss))
+    for name,setting,rr,ss in all_scenarios:
+        for row in ss:
+            paired=[r for r in rr if r["policy"]==row["policy"] and r["pro_precise_fraction"]==row["pro_precise_fraction"]]
+            def mean_defined(key):
+                values=[r[key] for r in paired if r[key] is not None]
+                return float(np.mean(values)) if values else None
+            comparisons.append(dict(scenario=name,target_device_cv=setting.capacity_cv,
+                common_log_variance_fraction=setting.capacity_common_fraction,**row,
+                delta_from_constant_pp=row["mean"]-lookup[(row["pro_precise_fraction"],row["policy"])] ,
+                site2_precise_sent_to_site2_pct=mean_defined("site2_precise_sent_to_site2_pct"),
+                site2_precise_prefill_completed_by_window_end_pct=mean_defined("site2_precise_prefill_completed_by_window_end_pct")))
+    write_csv(out/"capacity_variation_summary.csv",comparisons)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out",type=Path,default=BASE/"output")
@@ -465,6 +587,7 @@ def main():
     parser.add_argument("--rates",type=Path)
     parser.add_argument("--fraction",type=float,help="Replay one declared site2 precise fraction")
     parser.add_argument("--sensitivity",action="store_true")
+    parser.add_argument("--capacity-variation",action="store_true",help="Run four explicitly hypothetical device-variation comparisons")
     args=parser.parse_args()
     c=CONFIG
     if args.fraction is not None:
@@ -476,7 +599,9 @@ def main():
     if args.arrivals:
         # Replaying one measured trace does not produce three independent arrival traces.
         c=replace(c,seeds=(c.seeds[0],))
-    _,summary,plot=run_scenario(c,args.out,"main",args.arrivals,args.rates)
+    if args.capacity_variation and (args.arrivals or args.rates):
+        raise ValueError("--capacity-variation compares paired synthetic scenarios; use --rates alone for measured replay")
+    main_rows,summary,plot=run_scenario(c,args.out,"main",args.arrivals,args.rates)
     for r in plot:
         print(f"rps={r['precise_task_rate_rps']:g} " + " | ".join(f"{p}: {r[p+'_mean']:.3f}% [{r[p+'_min']:.3f},{r[p+'_max']:.3f}]" for p in POLICIES))
     if args.sensitivity:
@@ -490,6 +615,8 @@ def main():
             for r in ss:
                 all_rows.append(dict(scenario=name,**r,delta_from_main_pp=r["mean"]-main_lookup[(r["pro_precise_fraction"],r["policy"])]))
         write_csv(args.out/"sensitivity_summary.csv",all_rows)
+    if args.capacity_variation:
+        run_capacity_variation(c,args.out,main_rows,summary)
 
 
 if __name__=="__main__":

@@ -8,6 +8,7 @@
 | 平台与参数来源 | [实验环境](docs/experiment-environment.md) |
 | 子图(a)：混合需求下的请求分配 | [实验说明](experiments/task_distribution/README.md) |
 | 当前结果及解释范围 | [结果说明](experiments/task_distribution/RESULTS_AND_INTERPRETATION.md) |
+| 设备吞吐波动与纵轴分母 | [敏感性检查](experiments/task_distribution/CAPACITY_VARIATION.md) |
 | 结果图 | [PNG](experiments/task_distribution/output/allocation_ratio.png) / [PDF](experiments/task_distribution/output/allocation_ratio.pdf) |
 
 ## 快速复现
@@ -21,6 +22,9 @@ python simulate_allocation.py --sensitivity
 python validate_model.py
 python plot_allocation.py
 ```
+
+可选设备波动对照：`python simulate_allocation.py --capacity-variation`。
+该命令保留恒定吞吐参照，另行比较设备独立与站点共同波动，不将假设幅度当作实测参数。
 
 只改绘图时，修改 `plot_allocation.py` 顶部的 `STYLE` 并重新执行绘图命令。
 绘图脚本只依赖Matplotlib和CSV，不运行或导入仿真脚本，也不需要额外的样式JSON。

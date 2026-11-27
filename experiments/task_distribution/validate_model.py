@@ -6,7 +6,8 @@ import csv
 import json
 from pathlib import Path
 import numpy as np
-from simulate_allocation import CONFIG, Engine, make_arrivals, make_classes
+from simulate_allocation import (CONFIG, Engine, make_arrivals, make_classes,
+                                 make_capacity_trace, capacity_statistics, summarise_run)
 
 
 def exact_trace(times):
@@ -70,8 +71,11 @@ def test_exported(base):
         for r in csv.DictReader(f):
             if int(r["measurement"])!=1:continue
             key=(int(r["run"]),float(r["pro_precise_fraction"]),r["policy"])
-            c=counts.setdefault(key,[0,0,0,0])
+            c=counts.setdefault(key,[0,0,0,0,0,0])
             c[0]+=1
+            if int(r["kind"])==2:
+                c[4]+=1
+                c[5]+=int(r["assigned_site"])==2 and float(r["prefill_finish_s"]) < CONFIG.warmup_s+CONFIG.measurement_s
             if int(r["assigned_site"])==2:
                 c[1]+=1;c[2]+=int(r["kind"])==2
             c[3]+=int(r["semantic_match"])==0
@@ -80,9 +84,16 @@ def test_exported(base):
             assert abs(float(r["queue_wait_s"])-(s-n))<1e-8
     for r in runs:
         key=(int(r["run"]),float(r["pro_precise_fraction"]),r["policy"])
-        n,n2,p,wrong=counts[key]
+        n,n2,p,wrong,input_p2,complete_p2=counts[key]
         assert n==int(r["requests"]) and n2==int(r["site2_requests"]) and p==int(r["site2_precise_requests"])
         assert abs(100*p/n2-float(r["precise_at_site2_pct"]))<1e-9
+        assert input_p2==int(r["input_site2_precise_requests"])
+        if input_p2:
+            assert abs(float(r["site2_precise_sent_to_site2_pct"])-100*p/input_p2)<1e-9
+            assert abs(float(r["site2_precise_prefill_completed_by_window_end_pct"])-100*complete_p2/input_p2)<1e-9
+        else:
+            assert r["site2_precise_sent_to_site2_pct"]==""
+            assert r["site2_precise_prefill_completed_by_window_end_pct"]==""
         if r["policy"]!="Dyncast-task":assert wrong==0
     with (base/"plot_data.csv").open() as f:
         plot=list(csv.DictReader(f))
@@ -100,9 +111,54 @@ def test_exported(base):
             "paired offered counts", "no semantic violations by constrained policies"]
 
 
+def test_capacity_and_metric_definitions():
+    c=replace(CONFIG,warmup_s=0.,measurement_s=30.,workstations_per_site=(1,1),
+        per_workstation_prefill_tps=(400.,400.),input_bytes_per_token=0.,
+        request_overhead_bytes=0,response_bytes=0)
+    assert make_capacity_trace(c,123)==[]
+    varying=replace(c,capacity_cv=.10)
+    rates=make_capacity_trace(varying,123)
+    assert rates==make_capacity_trace(varying,123)
+    assert all(r["prefill_tps"]>0 for r in rates)
+    assert np.array_equal(make_arrivals(c,123)["times"],make_arrivals(varying,123)["times"])
+    tr=exact_trace([0.]*10)
+    kinds=np.ones(10,dtype=int)
+    constant=Engine(c,tr,kinds,"L3GSA").run()
+    changing=Engine(varying,tr,kinds,"L3GSA",rates).run()
+    assert not np.allclose([r["prefill_finish_s"] for r in constant],
+                           [r["prefill_finish_s"] for r in changing])
+
+    shared=replace(c,capacity_cv=.10,capacity_common_fraction=1.,workstations_per_site=(4,4))
+    rr=make_capacity_trace(shared,123)
+    at_zero=[r["prefill_tps"] for r in rr if r["time_s"]==0 and r["site"]==1]
+    assert len(set(at_zero))==1  # Shared fluctuations are not averaged away.
+    stats=capacity_statistics(shared,rr,1,123)
+    single=next(r for r in stats if r["site"]==1 and r["worker"]=="1")
+    total=next(r for r in stats if r["site"]==1 and r["worker"]=="aggregate")
+    assert abs(single["observed_cv"]-total["observed_cv"])<1e-12
+    independent=make_capacity_trace(replace(shared,capacity_common_fraction=0.),123)
+    assert len({r["prefill_tps"] for r in independent if r["time_s"]==0 and r["site"]==1})==4
+
+    # Concrete denominator example: two site2-precise + three fuzzy tasks all to site2.
+    tr=exact_trace([0.]*5)
+    eng=Engine(c,tr,np.array([2,2,0,0,0]),"CoAP-static")
+    row=summarise_run(c,eng.run(),"CoAP-static",1,123,.4,eng,"metric_test")
+    assert row["precise_at_site2_pct"]==40.
+    assert row["site2_precise_sent_to_site2_pct"]==100.
+    assert row["site2_precise_prefill_completed_by_window_end_pct"]==100.
+    # Regression: a valid all-fuzzy measured cohort has undefined precise accuracy.
+    eng=Engine(c,tr,np.zeros(5,dtype=int),"L3GSA")
+    row=summarise_run(c,eng.run(),"L3GSA",1,123,0.,eng,"all_fuzzy_replay")
+    assert row["precise_model_assignment_accuracy_pct"] is None
+    assert row["site2_precise_sent_to_site2_pct"] is None
+    return ["constant-capacity path unchanged", "reproducible independent capacity seed stream",
+            "capacity variation affects physical completions", "shared versus independent workstation variation",
+            "composition versus assignment denominators", "all-fuzzy replay with undefined precise accuracy"]
+
+
 def main():
     base=Path(__file__).resolve().parent
-    checks=test_engine()+test_exported(base/"output")
+    checks=test_engine()+test_capacity_and_metric_definitions()+test_exported(base/"output")
     result=dict(status="passed",checks=checks,hardware_error_validation="unavailable: no independent measured per-request reference supplied")
     (base/"output"/"validation_report.json").write_text(json.dumps(result,indent=2)+"\n")
     print(json.dumps(result,indent=2))
