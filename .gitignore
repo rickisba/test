@@ -10,3 +10,4 @@ experiments/task_distribution/output/queue_snapshots.csv
 experiments/task_distribution/output/input_traces.csv
 experiments/task_distribution/figures/
 experiments/task_distribution/replay/
+experiments/task_distribution/output/**/capacity_traces.csv

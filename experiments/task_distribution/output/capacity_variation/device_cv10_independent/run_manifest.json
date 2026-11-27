@@ -1,0 +1,91 @@
+{
+  "configuration": {
+    "input_tokens": 400,
+    "output_tokens": 1,
+    "per_workstation_prefill_tps": [
+      2823.0,
+      581.0
+    ],
+    "workstations_per_site": [
+      4,
+      4
+    ],
+    "offered_rps": 24.0,
+    "site1_precise_fraction": 0.1,
+    "site2_precise_fractions": [
+      0.0,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "seeds": [
+      2026112701,
+      2026112702,
+      2026112703
+    ],
+    "warmup_s": 60.0,
+    "measurement_s": 300.0,
+    "arrival_gamma_shape": 0.7,
+    "metric_window_s": 10.0,
+    "report_period_s": 1.0,
+    "report_delay_s": 0.2,
+    "max_batch_requests": 1,
+    "routing_metric": "processed_work_plus_backlog",
+    "capacity_cv": 0.1,
+    "capacity_common_fraction": 0.0,
+    "capacity_correlation_s": 5.0,
+    "capacity_step_s": 1.0,
+    "active_local_clients": 4,
+    "client_nic_mbps": 1000.0,
+    "upload_mbps": [
+      942.0,
+      944.0
+    ],
+    "download_mbps": [
+      942.0,
+      944.0
+    ],
+    "input_bytes_per_token": 4.0,
+    "request_overhead_bytes": 128,
+    "response_bytes": 132,
+    "one_way_propagation_ms": 0.0
+  },
+  "scenario": "device_cv10_independent",
+  "result_type": "capacity-calibrated prefill-work queue simulation; not new hardware measurements",
+  "routing_metric": "(reported processed input tokens in last W + reported outstanding input tokens + locally known input work assigned since the sample + current request input tokens)/(reported aggregate prefill tps * W)",
+  "capacity_scope": "2823/581 tokens/s are per-workstation log values; independent replication over 4 workstations/site is an explicit assumption",
+  "deployment_assumption": "Two same-region model pools, one type-A pool and one type-B pool. The PDF specifies hardware types and 4 workstations/site but not this exact model-to-workstation placement.",
+  "sources": {
+    "topology": "GSA (9).pdf, Section V-A and Table IV; Chinese draft not used",
+    "workload": "User: 400 input tokens, 1 output token",
+    "rates": "User: device prefill token/s logs, 2823 and 581; raw saturated-load logs not supplied"
+  },
+  "rate_trace_file": null,
+  "arrivals_file": null,
+  "independent_arrival_repetitions": true,
+  "capacity_process": {
+    "type": "stationary lognormal AR(1)",
+    "amplitude_status": "synthetic sensitivity assumptions, not inferred from the two mean throughput values",
+    "target_device_cv": 0.1,
+    "within_site_shared_log_variance_fraction": 0.0,
+    "temporal_correlation_s": 5.0,
+    "sample_interval_s": 1.0,
+    "main_axis": "site-2 precise requests assigned to site 2 / all requests assigned to site 2",
+    "assignment_axis": "site-2 precise requests assigned to site 2 / all offered site-2 precise requests"
+  },
+  "limitations": [
+    "Logged prompt throughput may be achieved offered-load throughput rather than saturated service capacity.",
+    "Four identical independent replicas per pool are assumed; scaling has not been measured.",
+    "FCFS/additive token-work batching does not emulate vLLM continuous batching or KV-cache behavior.",
+    "Decode, CPU/API delay and unmeasured propagation/switch delays are excluded; surrogate latency is not measured TTFT/E2E latency.",
+    "Unbounded queues and no failures/timeouts; all requests drain, which is not proof of real service completion success.",
+    "Main figure is allocation composition. Cohort is defined by arrival time and drained without boundary censoring.",
+    "Three run proportions are averaged arithmetically; min-max bars are not confidence intervals.",
+    "Sensitivity scenarios are not pooled as extra repetitions.",
+    "No error against hardware latency/composition can be quantified without independent measured reference logs."
+  ],
+  "runtime": {
+    "python": "3.12.14",
+    "numpy": "2.3.5"
+  }
+}

@@ -31,6 +31,10 @@
     "report_delay_s": 0.0,
     "max_batch_requests": 1,
     "routing_metric": "processed_work_plus_backlog",
+    "capacity_cv": 0.0,
+    "capacity_common_fraction": 0.0,
+    "capacity_correlation_s": 5.0,
+    "capacity_step_s": 1.0,
     "active_local_clients": 4,
     "client_nic_mbps": 1000.0,
     "upload_mbps": [
@@ -59,6 +63,16 @@
   "rate_trace_file": null,
   "arrivals_file": null,
   "independent_arrival_repetitions": true,
+  "capacity_process": {
+    "type": "constant reference",
+    "amplitude_status": "synthetic sensitivity assumptions, not inferred from the two mean throughput values",
+    "target_device_cv": 0.0,
+    "within_site_shared_log_variance_fraction": 0.0,
+    "temporal_correlation_s": 5.0,
+    "sample_interval_s": 1.0,
+    "main_axis": "site-2 precise requests assigned to site 2 / all requests assigned to site 2",
+    "assignment_axis": "site-2 precise requests assigned to site 2 / all offered site-2 precise requests"
+  },
   "limitations": [
     "Logged prompt throughput may be achieved offered-load throughput rather than saturated service capacity.",
     "Four identical independent replicas per pool are assumed; scaling has not been measured.",
